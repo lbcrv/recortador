@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<!-- Privacidad: la página solo puede conectarse a sí misma, al CDN de la librería y a Hugging Face (descarga del modelo). -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; connect-src 'self' blob: data: https://cdn.jsdelivr.net https://huggingface.co https://*.huggingface.co https://*.hf.co; img-src 'self' blob: data:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; form-action 'none'; base-uri 'self'">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#16181d">
+<title>Recortador</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+:root{
+  --bg:#16181d; --panel:#1f2229; --panel2:#272b34; --line:#343945; --text:#e8eaef; --muted:#9aa1ae;
+  --acc:#5b9cff; --acc2:#2f6fd6; --danger:#ff6b6b;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:15px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overscroll-behavior:none}
+body{display:flex;flex-direction:column;height:100dvh;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+button{font:inherit;color:inherit;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 12px;cursor:pointer}
+button:disabled{opacity:.4}
+button.primary{background:var(--acc2);border-color:var(--acc)}
+button.on{background:var(--acc2);border-color:var(--acc)}
+header{display:flex;align-items:center;gap:6px;padding:8px 10px;background:var(--panel);border-bottom:1px solid var(--line)}
+header h1{font-size:17px;margin:0 auto 0 4px;font-weight:600}
+header button{padding:7px 10px}
+.icon{width:20px;height:20px;display:block}
+#stage{flex:1;position:relative;overflow:hidden;touch-action:none;background:#0f1114}
+#cv{position:absolute;left:0;top:0;transform-origin:0 0;
+  background-color:#fff;background-image:linear-gradient(45deg,#cfd3da 25%,transparent 25%,transparent 75%,#cfd3da 75%),linear-gradient(45deg,#cfd3da 25%,transparent 25%,transparent 75%,#cfd3da 75%);
+  background-size:24px 24px;background-position:0 0,12px 12px}
+#cv.white{background:#fff}#cv.black{background:#000}#cv.custom{background-image:none}
+#cursor{position:absolute;border:2px solid #fff;outline:1px solid #000;border-radius:50%;pointer-events:none;display:none;transform:translate(-50%,-50%)}
+#empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center}
+#empty .big{font-size:17px;padding:16px 26px}
+#empty p{color:var(--muted);max-width:340px;margin:0}
+.lock{display:inline-flex;gap:6px;align-items:center;color:#8fd19e;font-size:13px}
+#busy{position:absolute;inset:0;background:rgba(10,12,16,.72);display:none;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px;text-align:center}
+#busy.show{display:flex}
+.bar{width:min(320px,80%);height:8px;background:var(--line);border-radius:4px;overflow:hidden}
+.bar>div{height:100%;width:0;background:var(--acc);transition:width .2s}
+#toast{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);background:#000c;padding:8px 14px;border-radius:20px;font-size:14px;opacity:0;transition:opacity .25s;pointer-events:none;max-width:90%;text-align:center}
+#toast.show{opacity:1}
+#tools{background:var(--panel);border-top:1px solid var(--line)}
+#tabs{display:grid;grid-template-columns:repeat(4,1fr)}
+#tabs button{border:0;border-radius:0;background:none;padding:9px 4px 8px;display:flex;flex-direction:column;align-items:center;gap:3px;font-size:12.5px;color:var(--muted)}
+#tabs button.on{color:var(--text);background:var(--panel2);box-shadow:inset 0 2px 0 var(--acc)}
+.pane{display:none;padding:10px 12px 12px;gap:10px;flex-direction:column;border-bottom:1px solid var(--line)}
+.pane.on{display:flex}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.row>button{flex:1}
+.hint{color:var(--muted);font-size:13px;margin:0}
+label.sl{display:grid;grid-template-columns:92px 1fr 34px;align-items:center;gap:8px;font-size:13.5px}
+label.sl output{text-align:right;color:var(--muted)}
+input[type=range]{width:100%;accent-color:var(--acc)}
+label.ck{display:flex;gap:8px;align-items:center;font-size:14px}
+input[type=checkbox]{width:18px;height:18px;accent-color:var(--acc)}
+select{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px}
+.sw{width:30px;height:30px;border-radius:8px;border:2px solid var(--line);padding:0;flex:0 0 auto}
+.sw.on{border-color:var(--acc)}
+.sw.chk{background:#fff linear-gradient(45deg,#bbb 25%,transparent 25%,transparent 75%,#bbb 75%),linear-gradient(45deg,#bbb 25%,transparent 25%,transparent 75%,#bbb 75%);background-size:10px 10px;background-position:0 0,5px 5px}
+input[type=color]{width:30px;height:30px;border:2px solid var(--line);border-radius:8px;padding:0;background:none}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+<header>
+  <h1>Recortador</h1>
+  <button id="bUndo" title="Deshacer" disabled><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg></button>
+  <button id="bRedo" title="Rehacer" disabled><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg></button>
+  <button id="bFit" title="Ajustar a pantalla"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/></svg></button>
+  <button id="bOpen" class="primary" title="Abrir otra foto"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></svg></button>
+</header>
+
+<div id="stage">
+  <canvas id="cv" class="hidden"></canvas>
+  <div id="cursor"></div>
+  <div id="empty">
+    <button class="primary big" id="bOpen2">Elegir foto</button>
+    <p>Quita el fondo con un toque. Funciona sin conexión una vez descargado el modelo de IA.</p>
+    <span class="lock"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Tus fotos nunca salen del teléfono</span>
+  </div>
+  <div id="busy"><div id="busyTxt">Procesando…</div><div class="bar"><div id="busyBar"></div></div><div class="hint" id="busySub"></div></div>
+  <div id="toast"></div>
+</div>
+
+<div id="tools" class="hidden">
+  <!-- Fondo liso -->
+  <div class="pane" id="p-flat">
+    <p class="hint">Toca el fondo para quitar ese color. Toca otras zonas para quitar más.</p>
+    <label class="sl">Tolerancia <input type="range" id="fTol" min="2" max="80" value="20"><output id="oTol">20</output></label>
+    <label class="sl">Suavizado <input type="range" id="fFea" min="0" max="50" value="14"><output id="oFea">14</output></label>
+    <label class="sl">Contraer borde <input type="range" id="fChk" min="0" max="4" value="1"><output id="oChk">1</output></label>
+    <div class="row">
+      <label class="ck"><input type="checkbox" id="fCont" checked>Solo zona conectada</label>
+      <button id="fReset" style="flex:0 0 auto">Reiniciar</button>
+    </div>
+  </div>
+  <!-- IA -->
+  <div class="pane" id="p-ai">
+    <p class="hint" id="aiHint">Para fondos con cosas (paisajes, habitaciones, personas). La primera vez descarga el modelo y queda guardado.</p>
+    <div class="row">
+      <select id="aiQ"><option value="fast">Rápido · 44 MB</option><option value="best">Máxima calidad · 176 MB</option></select>
+      <button class="primary" id="aiRun">Quitar fondo con IA</button>
+    </div>
+  </div>
+  <!-- Pincel -->
+  <div class="pane" id="p-brush">
+    <div class="row">
+      <button id="brErase" class="on">Borrar</button>
+      <button id="brRestore">Restaurar</button>
+    </div>
+    <label class="sl">Tamaño <input type="range" id="brSize" min="6" max="140" value="40"><output id="oSize">40</output></label>
+    <div class="row">
+      <label class="ck"><input type="checkbox" id="brOff" checked>Pincel arriba del dedo</label>
+      <button id="brChoke" style="flex:0 0 auto">Contraer borde 1px</button>
+    </div>
+    <p class="hint">Dos dedos para mover y hacer zoom.</p>
+  </div>
+  <!-- Guardar -->
+  <div class="pane" id="p-save">
+    <div class="row" id="views">
+      <span class="hint" style="flex:0 0 auto">Fondo:</span>
+      <button class="sw chk on" data-v="chk" title="Transparente"></button>
+      <button class="sw" data-v="white" style="background:#fff" title="Blanco"></button>
+      <button class="sw" data-v="black" style="background:#000" title="Negro"></button>
+      <input type="color" id="vColor" value="#f2c94c" title="Otro color">
+    </div>
+    <label class="ck"><input type="checkbox" id="sCrop" checked>Recortar al objeto (con margen de <input type="number" id="sPad" value="20" min="0" max="500" style="width:56px;margin:0 4px;font:inherit;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:2px 4px">px)</label>
+    <label class="ck"><input type="checkbox" id="sHalo" checked>Quitar halo de color del borde</label>
+    <div class="row">
+      <button class="primary" id="sSave">Guardar PNG</button>
+      <button id="sShare">Compartir</button>
+    </div>
+  </div>
+  <nav id="tabs">
+    <button data-t="flat"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m19 11-8-8-8.6 8.6a2 2 0 0 0 0 2.8l5.2 5.2c.8.8 2 .8 2.8 0L19 11Z"/><path d="m5 2 5 5"/><path d="M2 13h15"/><path d="M22 20a2 2 0 1 1-4 0c0-1.6 1.7-2.4 2-4 .3 1.6 2 2.4 2 4Z"/></svg>Fondo liso</button>
+    <button data-t="ai"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9Z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9Z"/></svg>IA</button>
+    <button data-t="brush"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9.06 11.9 8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08"/><path d="M7.07 14.94c-1.66 0-3 1.35-3 3.02 0 1.33-2.5 1.52-2 2.02 1.08 1.1 2.49 2.02 4 2.02 2.2 0 4-1.8 4-4.04a3.01 3.01 0 0 0-3-3.02z"/></svg>Pincel</button>
+    <button data-t="save"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>Guardar</button>
+  </nav>
+</div>
+
+<input type="file" id="file" accept="image/*" class="hidden">
+<script type="module" src="app.js"></script>
+</body>
+</html>
