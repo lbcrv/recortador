@@ -1,5 +1,5 @@
 // Service worker: guarda la app para usarla sin conexión y recibe fotos compartidas desde la galería.
-const V = 'recortador-v1';
+const V = 'recortador-v1'; // versión de la app: 5
 const SHELL = ['./', './index.html', './app.js', './manifest.webmanifest', './icon.svg', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {
@@ -30,7 +30,9 @@ self.addEventListener('fetch', (e) => {
     e.respondWith((async () => {
       const c = await caches.open(V);
       try {
-        const r = await fetch(e.request);
+        // no-cache: siempre pregunta al servidor si hay versión nueva (evita esperar la caché de 10 min)
+        // (se usa la URL y no e.request: una navegación no admite opciones extra)
+        const r = await fetch(url.href, { cache: 'no-cache', credentials: 'same-origin' });
         if (r.ok) c.put(e.request, r.clone());
         return r;
       } catch {
