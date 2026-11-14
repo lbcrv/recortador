@@ -19,7 +19,7 @@ const S = {
   tab: 'flat',
   view: { s: 1, x: 0, y: 0 },
   flat: { seeds: [], tol: 20, feather: 14, choke: 1, contiguous: true },
-  brush: { size: 40, erase: true, offset: true },
+  brush: { size: 40, hard: 100, erase: true, offset: true },
   dehalo: true,
   viewBg: 'chk', viewColor: '#f2c94c',
 };
@@ -285,13 +285,15 @@ function estimateBg() {
 
 // ---------- pincel ----------
 function paintDot(ix, iy) {
-  const r = S.brush.size / 2 / S.view.s, inner = r * 0.55;
+  const r = S.brush.size / 2 / S.view.s;
+  // dureza 100 = borde duro (solo ~1 px de antialias); menos = más difuminado
+  const soft = Math.max(0.8, r * (1 - S.brush.hard / 100)), inner = Math.max(0, r - soft);
   const x0 = Math.max(0, Math.floor(ix - r)), x1 = Math.min(S.W - 1, Math.ceil(ix + r));
   const y0 = Math.max(0, Math.floor(iy - r)), y1 = Math.min(S.H - 1, Math.ceil(iy + r));
   const A = S.alpha, src = S.src, er = S.brush.erase;
   for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
     const d = Math.hypot(x - ix, y - iy); if (d > r) continue;
-    const t = d <= inner ? 1 : 1 - (d - inner) / (r - inner); // fuerza 0..1
+    const t = d <= inner ? 1 : 1 - (d - inner) / (r - inner || 1); // fuerza 0..1
     const i = y * S.W + x;
     if (er) { const v = 255 * (1 - t); if (v < A[i]) A[i] = v; }
     else { const v = Math.min(255 * t, src[i * 4 + 3]); if (v > A[i]) A[i] = v; }
@@ -449,6 +451,7 @@ $('#aiRun').onclick = runAI;
 $('#brErase').onclick = () => { S.brush.erase = true; $('#brErase').classList.add('on'); $('#brRestore').classList.remove('on'); };
 $('#brRestore').onclick = () => { S.brush.erase = false; $('#brRestore').classList.add('on'); $('#brErase').classList.remove('on'); };
 $('#brSize').oninput = (e) => { S.brush.size = +e.target.value; $('#oSize').textContent = e.target.value; };
+$('#brHard').oninput = (e) => { S.brush.hard = +e.target.value; $('#oHard').textContent = e.target.value; };
 $('#brOff').onchange = (e) => { S.brush.offset = e.target.checked; };
 $('#brChoke').onclick = choke;
 
