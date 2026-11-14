@@ -203,11 +203,30 @@ function flatTap(ix, iy) {
 
 // ---------- IA ----------
 let AI = null, aiKey = '';
+const RMBG_PRE = {
+  do_normalize: true, do_pad: false, do_rescale: true, do_resize: true,
+  image_mean: [0.5, 0.5, 0.5], image_std: [1, 1, 1], feature_extractor_type: 'ImageFeatureExtractor',
+  resample: 2, rescale_factor: 1 / 255, size: { width: 1024, height: 1024 },
+};
+async function gpuInfo() {
+  try {
+    const ad = navigator.gpu && (await navigator.gpu.requestAdapter());
+    return { gpu: !!ad, f16: !!ad && ad.features.has('shader-f16') };
+  } catch { return { gpu: false, f16: false }; }
+}
+// qué modelo y en qué orden intentar dispositivo/precisión
+async function modelPlan(q) {
+  const { gpu } = await gpuInfo();
+  if (q === 'fast') return { id: MODEL, rmbg: true, tries: [['wasm', 'q8']] };
+  return { id: MODEL, rmbg: true, tries: gpu ? [['webgpu', 'fp32'], ['wasm', 'fp32']] : [['wasm', 'fp32']] };
+}
 async function loadAI(q) {
   if (AI && aiKey === q) return AI;
+  if (AI) { try { await AI.model.dispose(); } catch {} AI = null; }
   const T = await import(TRANSFORMERS);
   T.env.allowLocalModels = false;
-  const files = {};
+  const plan = await modelPlan(q);
+  let files = {};
   const progress_callback = (e) => {
     if (e.status === 'progress' && e.total) {
       files[e.file] = [e.loaded, e.total];
@@ -215,33 +234,52 @@ async function loadAI(q) {
       busy(true, 'Descargando modelo (solo la primera vez)…', (100 * l) / t, `${(l / 1e6).toFixed(1)} / ${(t / 1e6).toFixed(1)} MB`);
     }
   };
-  const tryLoad = async (device, dtype) => T.AutoModel.from_pretrained(MODEL, { config: { model_type: 'custom' }, device, dtype, progress_callback });
-  let model;
-  const gpu = !!navigator.gpu && !!(await navigator.gpu.requestAdapter().catch(() => null));
-  if (q === 'best') {
-    try { model = gpu ? await tryLoad('webgpu', 'fp32') : await tryLoad('wasm', 'fp32'); }
-    catch (e) { console.warn('fallback', e); model = await tryLoad('wasm', 'fp32'); }
-  } else {
-    model = await tryLoad('wasm', 'q8');
+  let model, used, lastErr;
+  for (const [device, dtype] of plan.tries) {
+    try {
+      files = {};
+      const opts = { device, dtype, progress_callback };
+      if (plan.rmbg) opts.config = { model_type: 'custom' };
+      model = await T.AutoModel.from_pretrained(plan.id, opts);
+      used = device + '/' + dtype; break;
+    } catch (e) { console.warn('No se pudo con', device, dtype, e); lastErr = e; }
   }
-  const processor = await T.AutoProcessor.from_pretrained(MODEL, {
-    config: {
-      do_normalize: true, do_pad: false, do_rescale: true, do_resize: true,
-      image_mean: [0.5, 0.5, 0.5], image_std: [1, 1, 1], feature_extractor_type: 'ImageFeatureExtractor',
-      resample: 2, rescale_factor: 1 / 255, size: { width: 1024, height: 1024 },
-    },
-  });
-  AI = { T, model, processor }; aiKey = q;
+  if (!model) throw lastErr;
+  const processor = plan.rmbg
+    ? await T.AutoProcessor.from_pretrained(plan.id, { config: RMBG_PRE })
+    : await T.AutoProcessor.from_pretrained(plan.id);
+  AI = { T, model, processor, used }; aiKey = q;
+  console.log('IA lista:', plan.id, used);
   return AI;
+}
+function halfToFloat(h) {
+  const s = (h & 0x8000) ? -1 : 1, e = (h >> 10) & 0x1f, f = h & 0x3ff;
+  if (e === 0) return s * 2 ** -14 * (f / 1024);
+  if (e === 31) return f ? NaN : s * Infinity;
+  return s * 2 ** (e - 15) * (1 + f / 1024);
+}
+// convierte la salida del modelo (cualquier precisión) en máscara 0..255
+function tensorToMask(t) {
+  const dims = t.dims, mh = dims[dims.length - 2], mw = dims[dims.length - 1], n = mw * mh;
+  let d = t.data;
+  if (d instanceof Uint16Array) { const f = new Float32Array(n); for (let i = 0; i < n; i++) f[i] = halfToFloat(d[i]); d = f; }
+  let mn = Infinity, mx = -Infinity;
+  for (let i = 0; i < n; i++) { const v = d[i]; if (v < mn) mn = v; if (v > mx) mx = v; }
+  const logits = mn < -0.05 || mx > 1.05; // sin sigmoide aplicada
+  const u8 = new Uint8ClampedArray(n);
+  for (let i = 0; i < n; i++) { const v = logits ? 1 / (1 + Math.exp(-d[i])) : d[i]; u8[i] = v * 255; }
+  return { u8, mw, mh };
 }
 async function runAI() {
   const q = $('#aiQ').value;
+  try { localStorage.setItem('aiQ', q); } catch {}
   busy(true, 'Preparando IA…');
   await nextFrame();
   try {
     const { T, model, processor } = await loadAI(q);
-    busy(true, 'Quitando fondo…');
+    busy(true, 'Quitando fondo…', null, '');
     await nextFrame();
+    const t0 = performance.now();
     // imagen original sin máscara, reducida (el modelo trabaja a 1024 px)
     const k = Math.min(1, 1024 / Math.max(S.W, S.H));
     const w = Math.round(S.W * k), h = Math.round(S.H * k);
@@ -252,8 +290,10 @@ async function runAI() {
     const px = small.getContext('2d').getImageData(0, 0, w, h).data;
     const image = new T.RawImage(new Uint8ClampedArray(px), w, h, 4).rgb();
     const { pixel_values } = await processor(image);
-    const { output } = await model({ input: pixel_values });
-    const mask = await T.RawImage.fromTensor(output[0].mul(255).to('uint8')).resize(S.W, S.H);
+    const inName = model.sessions?.model?.inputNames?.[0] || 'input';
+    const outs = await model({ [inName]: pixel_values });
+    const { u8, mw, mh } = tensorToMask(Object.values(outs)[0]);
+    const mask = await new T.RawImage(u8, mw, mh, 1).resize(S.W, S.H);
     snapshot();
     const A = new Uint8ClampedArray(S.W * S.H), m = mask.data, src = S.src;
     for (let i = 0; i < A.length; i++) {
@@ -263,10 +303,10 @@ async function runAI() {
     S.alpha = A;
     S.bg = estimateBg();
     compose();
-    toast('Listo. Usa el pincel para retocar.');
+    toast(`Listo en ${((performance.now() - t0) / 1000).toFixed(1)} s. Usa el pincel para retocar.`);
   } catch (e) {
     console.error(e);
-    toast('Error con la IA: ' + (e.message || e), 5000);
+    toast('Error con la IA: ' + (e.message || e), 6000);
   } finally { busy(false); }
 }
 // color de fondo promedio (si es parejo) para quitar halo tras la IA
@@ -447,6 +487,7 @@ $('#fCont').onchange = (e) => { S.flat.contiguous = e.target.checked; if (S.flat
 $('#fReset').onclick = () => { S.flat.seeds = []; runFlat(); };
 
 $('#aiRun').onclick = runAI;
+try { const q = localStorage.getItem('aiQ'); if (q && $('#aiQ').querySelector(`option[value="${q}"]`)) $('#aiQ').value = q; } catch {}
 
 $('#brErase').onclick = () => { S.brush.erase = true; $('#brErase').classList.add('on'); $('#brRestore').classList.remove('on'); };
 $('#brRestore').onclick = () => { S.brush.erase = false; $('#brRestore').classList.add('on'); $('#brErase').classList.remove('on'); };
@@ -523,4 +564,4 @@ setTab('flat');
 checkShared();
 
 // para pruebas desde la consola
-window.__recortador = { S, loadFile, runFlat, runAI };
+window.__recortador = { S, loadFile, runFlat, runAI, get AI() { return AI; } };
