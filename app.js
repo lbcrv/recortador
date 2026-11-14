@@ -21,6 +21,8 @@ const S = {
   flat: { seeds: [], tol: 20, feather: 14, choke: 1, contiguous: true },
   brush: { size: 40, hard: 100, erase: true, offset: true },
   dehalo: true,
+  aiA: null,      // última máscara de IA de esta foto (para proteger el objeto)
+  protect: true,  // fondo liso + IA
   viewBg: 'chk', viewColor: '#f2c94c',
 };
 
@@ -58,7 +60,7 @@ async function loadFile(file) {
     S.alpha = new Uint8ClampedArray(W * H);
     // pixeles ya transparentes en el original (PNG) se respetan
     for (let i = 0, n = W * H; i < n; i++) S.alpha[i] = S.src[i * 4 + 3];
-    S.bg = null; S.undo = []; S.redo = []; S.flat.seeds = [];
+    S.bg = null; S.aiA = null; S.undo = []; S.redo = []; S.flat.seeds = [];
     S.name = (file.name || 'imagen').replace(/\.[^.]+$/, '');
     $('#empty').classList.add('hidden'); cv.classList.remove('hidden'); $('#tools').classList.remove('hidden');
     fit(); compose(); updUndo();
@@ -68,6 +70,11 @@ async function loadFile(file) {
       S.flat.seeds = [auto.seed];
       setTab('flat');
       runFlat(false);
+      if (S.protect) {
+        // la IA identifica el objeto para que el fondo liso no se "derrame" dentro de él
+        const ok = await ensureAIMask();
+        if (ok) runFlat(false);
+      }
       toast('Fondo liso detectado ✔  Toca el fondo si falta algo');
     } else {
       setTab('ai');
@@ -188,16 +195,34 @@ function runFlat(pushUndo = true) {
   }
   let out = A;
   for (let k = 0; k < S.flat.choke; k++) out = erode(out);
+  if (S.protect && S.aiA) out = protectWithAI(out);
   S.alpha = out;
   S.bg = S.flat.seeds[0].c;
   compose();
 }
-function flatTap(ix, iy) {
+// zona que la IA considera objeto con certeza (encogida unos px para que el borde lo defina el fondo liso)
+let coreCache = null;
+function aiCore() {
+  if (coreCache && coreCache.src === S.aiA) return coreCache.core;
+  let c = new Uint8ClampedArray(S.aiA.length);
+  for (let i = 0; i < c.length; i++) c[i] = S.aiA[i] > 200 ? 255 : 0;
+  const n = Math.max(2, Math.round(Math.min(S.W, S.H) / 250));
+  for (let k = 0; k < n; k++) c = erode(c);
+  coreCache = { src: S.aiA, core: c };
+  return c;
+}
+function protectWithAI(A) {
+  const core = aiCore(), src = S.src;
+  for (let i = 0; i < A.length; i++) if (core[i] > A[i]) A[i] = Math.min(core[i], src[i * 4 + 3]);
+  return A;
+}
+async function flatTap(ix, iy) {
   ix = Math.round(ix); iy = Math.round(iy);
   if (ix < 0 || iy < 0 || ix >= S.W || iy >= S.H) return;
   const c = sampleColor(ix, iy);
   snapshot();
   S.flat.seeds = [...S.flat.seeds, { c, pts: [iy * S.W + ix] }];
+  if (S.protect && !S.aiA) await ensureAIMask();
   runFlat(false);
 }
 
@@ -270,16 +295,15 @@ function tensorToMask(t) {
   for (let i = 0; i < n; i++) { const v = logits ? 1 / (1 + Math.exp(-d[i])) : d[i]; u8[i] = v * 255; }
   return { u8, mw, mh };
 }
-async function runAI() {
+async function aiMask() {
   const q = $('#aiQ').value;
   try { localStorage.setItem('aiQ', q); } catch {}
   busy(true, 'Preparando IA…');
   await nextFrame();
-  try {
-    const { T, model, processor } = await loadAI(q);
-    busy(true, 'Quitando fondo…', null, '');
-    await nextFrame();
-    const t0 = performance.now();
+  const { T, model, processor } = await loadAI(q);
+  busy(true, 'Analizando la foto…');
+  await nextFrame();
+  {
     // imagen original sin máscara, reducida (el modelo trabaja a 1024 px)
     const k = Math.min(1, 1024 / Math.max(S.W, S.H));
     const w = Math.round(S.W * k), h = Math.round(S.H * k);
@@ -294,12 +318,26 @@ async function runAI() {
     const outs = await model({ [inName]: pixel_values });
     const { u8, mw, mh } = tensorToMask(Object.values(outs)[0]);
     const mask = await new T.RawImage(u8, mw, mh, 1).resize(S.W, S.H);
-    snapshot();
     const A = new Uint8ClampedArray(S.W * S.H), m = mask.data, src = S.src;
     for (let i = 0; i < A.length; i++) {
       let a = m[i]; if (a < 6) a = 0; else if (a > 249) a = 255;
       A[i] = Math.min(a, src[i * 4 + 3]);
     }
+    S.aiA = A;
+    return A;
+  }
+}
+async function ensureAIMask() {
+  if (S.aiA) return true;
+  try { await aiMask(); return true; }
+  catch (e) { console.error(e); toast('No se pudo usar la IA: ' + (e.message || e), 5000); return false; }
+  finally { busy(false); }
+}
+async function runAI() {
+  try {
+    const t0 = performance.now();
+    const A = (await aiMask()).slice();
+    snapshot();
     S.alpha = A;
     S.bg = estimateBg();
     compose();
@@ -485,6 +523,15 @@ for (const [id, key, out] of [['#fTol', 'tol', '#oTol'], ['#fFea', 'feather', '#
 }
 $('#fCont').onchange = (e) => { S.flat.contiguous = e.target.checked; if (S.flat.seeds.length) runFlat(); };
 $('#fReset').onclick = () => { S.flat.seeds = []; runFlat(); };
+try { const v = localStorage.getItem('protect'); if (v != null) S.protect = v === '1'; } catch {}
+$('#fProt').checked = S.protect;
+$('#fProt').onchange = async (e) => {
+  S.protect = e.target.checked;
+  try { localStorage.setItem('protect', S.protect ? '1' : '0'); } catch {}
+  if (!S.W) return;
+  if (S.protect && !S.aiA && !(await ensureAIMask())) return;
+  if (S.flat.seeds.length) runFlat();
+};
 
 $('#aiRun').onclick = runAI;
 try { const q = localStorage.getItem('aiQ'); if (q && $('#aiQ').querySelector(`option[value="${q}"]`)) $('#aiQ').value = q; } catch {}
